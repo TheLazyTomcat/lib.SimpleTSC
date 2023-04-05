@@ -146,6 +146,8 @@ unit SimpleTSC;
 
 {$IFDEF FPC}
   {$MODE ObjFPC}
+  {$MODESWITCH ClassicProcVars+}
+  {$MODESWITCH PointerToProcVar+}
   {$ASMMODE Intel}
 {$ENDIF}
 {$H+}
@@ -166,10 +168,11 @@ uses
 type
   ESTSCException = class(Exception);
 
-  ESTSCInvalidValue     = class(ESTSCException);
-  ESTSCInvalidState     = class(ESTSCException);
-  ESTSCIndexOutOfBounds = class(ESTSCException);
-  ESTSCSystemError      = class(ESTSCException);
+  ESTSCInvalidValue       = class(ESTSCException);
+  ESTSCInvalidState       = class(ESTSCException);
+  ESTSCIndexOutOfBounds   = class(ESTSCException);
+  ESTSCSystemError        = class(ESTSCException);
+  ESTSCCallNotImplemented = class(ESTSCException);
 
 {===============================================================================
     Core functions - declaration
@@ -189,8 +192,11 @@ type
   tscInvariant    TSC is invariant, that is, it does not change frequency and
                   can be used to measure real time (CPUID.80000007H:EDX[8] = 1)
                   (implies tscPresent)
+
+  tscSysProcID    function STSC_GetThreadProcessor is using a system call to
+                  obtain the thread processor ID
 }
-  TSTSCSupportedFeature = (tscPresent,tscEnabled,tscSupported,tscInvariant);
+  TSTSCSupportedFeature = (tscPresent,tscEnabled,tscSupported,tscInvariant,tscSysProcID);
   TSTSCSupportedFeatures = set of TSTSCSupportedFeature;
 
 {
@@ -389,59 +395,119 @@ Function STSC_MeasureCall(Call: TSTSCMeasuredCall; CallParam: Pointer): Int64; o
 ===============================================================================}
 type
 {$IFDEF Windows}
-  TSTSCProcessorSet = PtrUInt;
+  TSTSCProcessorMask = PtrUInt;
 {$ELSE}
-  TSTSCProcessorSet = array[0..Pred(128 div SizeOf(PtrUInt))] of PtrUInt;
+  TSTSCProcessorMask = array[0..Pred(128 div SizeOf(PtrUInt))] of PtrUInt;
 {$ENDIF}
-  PSTSCProcessorSet = ^TSTSCProcessorSet;
+  PSTSCProcessorMask = ^TSTSCProcessorMask;
 
 {
-  STSC_GetProcessorSetBit
+  STSC_GetProcessorMaskBit
 
-  Returns true when selected Bit in the ProcessorSet is 1, false otherwise.
+  Returns true when selected Bit in the ProcessorMask is 1, false otherwise.
 
   When Bit is out of allowable range, an exception of type ESTSCInvalidValue is
   raised.
 }
-Function STSC_GetProcessorSetBit(const ProcessorSet: TSTSCProcessorSet; Bit: Integer): Boolean;
+Function STSC_GetProcessorMaskBit(const ProcessorMask: TSTSCProcessorMask; Bit: Integer): Boolean;
 
 {
-  STSC_SetProcessorSetBit
+  STSC_SetProcessorMaskBit
 
-  Sets selected Bit in the ProcessorSet variable to 1.
+  Sets selected Bit in the ProcessorMask variable to 1.
 
   When Bit is out of allowable range, an exception of type ESTSCInvalidValue is
   raised.
 }
-procedure STSC_SetProcessorSetBit(var ProcessorSet: TSTSCProcessorSet; Bit: Integer);
+procedure STSC_SetProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer);
+
+{
+  STSC_ClrProcessorMaskBit
+
+  Sets selected Bit in the ProcessorMask variable to 0.
+
+  When Bit is out of allowable range, an exception of type ESTSCInvalidValue is
+  raised.
+}
+procedure STSC_ClrProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer);
 
 //------------------------------------------------------------------------------
 
 {
+  STSC_GetNumberOfProcessors
+
+  Returns number of logical processors currently available in the system.
+}
+Function STSC_GetNumberOfProcessors: Integer;
+
+{
   STSC_GetAvailableProcessors
 
-  Returns affinitz mask of current process. This can be used to discern which
-  CPUs can be used by threads.
+  Returns affinity mask of the current process. This can be used to discern
+  which CPU(s) can be used by a thread.
 }
-Function STSC_GetAvailableProcessors: TSTSCProcessorSet;
+Function STSC_GetAvailableProcessors: TSTSCProcessorMask;
 
 {
   STSC_ProcessorAvailable
 
-  Returns true when processor of given ID (number) is configured for the current
-  process (ie. is present in its affinity mask), false otherwise.
+  Returns true when processor of given ID (number) is configured for the
+  current process (ie. is present in its affinity mask), false otherwise.
 
   When ProcessorID is out of allowable range, the function will return false.
 }
 Function STSC_ProcessorAvailable(ProcessorID: Integer): Boolean;
 
-//------------------------------------------------------------------------------  
+//------------------------------------------------------------------------------
+{
+  STSC_GetThreadAffinity
 
-//Function STSC_GetThreadAffinity: TSTSCProcessorSet;
-//Function STSC_SetThreadAffinity(Mask: TSTSCProcessorSet): TSTSCProcessorSet;
+  Returns affinity mask of the calling thread.
+}
+Function STSC_GetThreadAffinity: TSTSCProcessorMask;
 
-//Function STSC_GetThreadProcessor: TSTSCProcessorSet;
-//Function STSC_SetThreadProcessor(ProcessorID: Integer): TSTSCProcessorSet;
+{
+  STSC_SetThreadAffinity
+
+  Sets affinity mask of the calling thread according to parameter AffinityMask
+  and returns its previous value.
+}
+Function STSC_SetThreadAffinity(AffinityMask: TSTSCProcessorMask): TSTSCProcessorMask;
+
+{
+  STSC_GetThreadProcessor
+
+  Returns processor ID (number) that executed this call (more precisely, the
+  system call that obtained the value).
+
+  In Linux, the number is obtained by function sched_getcpu.
+
+  In Windows, it is... complicated.
+
+    There is a function GetCurrentProcessorNumber exported by kernel32.dll, but
+    it is available only from Windows Vista onwards (Windows XP 64bit also
+    seems to have it), and since I am writing this library so it can run in
+    Windows XP too, use of that function cannot be hardcoded.
+    So, in unit initialization, the kernel32.dll is probed for this funtion.
+    When it is there, is gets binded and is then used to ontain the number.
+    If it is not present, then the number is obtained using SimpleCPUID library
+    (which is required by this unit anyway), more specifically from local APIC
+    ID (Info.AdditionalInfo.LocalAPICID). But note that this number might not
+    necessarily correspond to an ID used by the system - be aware of that.
+}
+Function STSC_GetThreadProcessor: Integer;
+
+{
+  STSC_SetThreadProcessor
+
+  Sets affinity of calling thread so that it will run only on the selected
+  processor ID and returns previous affinity mask.
+
+  If the selected processor cannot be used (is not configured for current
+  process), then an ESTSCInvalidValue exception is raised and affinity is not
+  changed.
+}
+Function STSC_SetThreadProcessor(ProcessorID: Integer): TSTSCProcessorMask;
 
 implementation
 
@@ -449,6 +515,7 @@ uses
 {$IFDEF Windows}
   Windows,
 {$ELSE}
+  baseunix,
 {$ENDIF}
   SimpleCPUID;
 
@@ -459,6 +526,10 @@ uses
 {$IFDEF Windows}
 
 Function GetProcessAffinityMask(hProcess: THandle; lpProcessAffinityMask,lpSystemAffinityMask: PPtrUInt): BOOL; stdcall; external kernel32;
+procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
+
+var
+  varGetCurrentProcessorNumber: Function: DWORD; stdcall = nil;
 
 {$ELSE}
 
@@ -468,13 +539,32 @@ Function errno_ptr: pcInt; cdecl; external name '__errno_location';
 
 Function sched_getaffinity(pid: pid_t; cpusetsize: size_t; mask: PCPUSet): cint; cdecl; external;
 Function sched_setaffinity(pid: pid_t; cpusetsize: size_t; mask: PCPUSet): cint; cdecl; external;
+Function sched_getcpu: cInt; cdecl; external;
+
+const
+  _SC_NPROCESSORS_ONLN = 84;
+
+Function sysconf(name: cInt): cLong; cdecl; external;
 
 {$ENDIF}
 
 {===============================================================================
     Internal functions
 ===============================================================================}
-{$IFNDEF Windows}                                                               
+{$IFDEF Windows}
+
+Function GetCurrentProcessorNumberCPUID: DWORD; stdcall;
+begin
+with TSimpleCPUID.Create do
+try
+  Result := DWORD(Info.AdditionalInfo.LocalAPICID);
+finally
+  Free;
+end;
+end;
+
+//------------------------------------------------------------------------------
+{$ELSE}
 threadvar
   ThrErrorCode: cInt;
 
@@ -628,7 +718,7 @@ procedure STSC_TimePoint(var Measurement: TSTSCMeasurement; TimePointIndex: Inte
 begin
 If Measurement.Initialized then
   begin
-    If (TimePointIndex <= Low(Measurement.TimePoints)) and (TimePointIndex >= High(Measurement.TimePoints)) then
+    If (TimePointIndex >= Low(Measurement.TimePoints)) and (TimePointIndex <= High(Measurement.TimePoints)) then
       begin
         Measurement.TimePoints[TimePointIndex].TimeStamp := STSC_GetTSCFence;
         Measurement.TimePoints[TimePointIndex].IsAssigned := True;
@@ -700,53 +790,90 @@ end;
     Auxiliary functions - implementation
 ===============================================================================}
 
-Function STSC_GetProcessorSetBit(const ProcessorSet: TSTSCProcessorSet; Bit: Integer): Boolean;
+Function STSC_GetProcessorMaskBit(const ProcessorMask: TSTSCProcessorMask; Bit: Integer): Boolean;
 begin
-If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorSet) * 8)) then
+If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorMask) * 8)) then
 {$IFDEF Windows}
-  Result := ((ProcessorSet shr Bit) and 1) <> 0
+  Result := ((ProcessorMask shr Bit) and 1) <> 0
 {$ELSE}
   {$IFDEF x64}
-  Result := ((ProcessorSet[Bit shr 6] shr (Bit and 63)) and 1) <> 0
+  Result := ((ProcessorMask[Bit shr 6] shr (Bit and 63)) and 1) <> 0
   {$ELSE}
-  Result := ((ProcessorSet[Bit shr 5] shr (Bit and 31)) and 1) <> 0
+  Result := ((ProcessorMask[Bit shr 5] shr (Bit and 31)) and 1) <> 0
   {$ENDIF}
 {$ENDIF}
 else
-  raise ESTSCInvalidValue.CreateFmt('STSC_GetProcessorSetBit: Invalid bit (%d) selected.',[Bit]);
+  raise ESTSCInvalidValue.CreateFmt('STSC_GetProcessorMaskBit: Invalid bit (%d) selected.',[Bit]);
 end;
 
 //------------------------------------------------------------------------------
 
-procedure STSC_SetProcessorSetBit(var ProcessorSet: TSTSCProcessorSet; Bit: Integer);
+procedure STSC_SetProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer);
 begin
-If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorSet) * 8)) then
+If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorMask) * 8)) then
 {$IFDEF Windows}
-  ProcessorSet := ProcessorSet or PtrUInt(PtrUInt(1) shl Bit)
+  ProcessorMask := ProcessorMask or PtrUInt(PtrUInt(1) shl Bit)
 {$ELSE}
   {$IFDEF x64}
-  ProcessorSet[Bit shr 6] := ProcessorSet[Bit shr 6] or PtrUInt(PtrUInt(1) shl (Bit and 63))
+  ProcessorMask[Bit shr 6] := ProcessorMask[Bit shr 6] or PtrUInt(PtrUInt(1) shl (Bit and 63))
   {$ELSE}
-  ProcessorSet[Bit shr 5] := ProcessorSet[Bit shr 5] or PtrUInt(PtrUInt(1) shl (Bit and 31))
+  ProcessorMask[Bit shr 5] := ProcessorMask[Bit shr 5] or PtrUInt(PtrUInt(1) shl (Bit and 31))
   {$ENDIF}
 {$ENDIF}
 else
-  raise ESTSCInvalidValue.CreateFmt('STSC_SetProcessorSetBit: Invalid bit (%d) selected.',[Bit]);
+  raise ESTSCInvalidValue.CreateFmt('STSC_SetProcessorMaskBit: Invalid bit (%d) selected.',[Bit]);
+end;
+
+//------------------------------------------------------------------------------
+
+procedure STSC_ClrProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer);
+begin
+If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorMask) * 8)) then
+{$IFDEF Windows}
+  ProcessorMask := ProcessorMask and not PtrUInt(PtrUInt(1) shl Bit)
+{$ELSE}
+  {$IFDEF x64}
+  ProcessorMask[Bit shr 6] := ProcessorMask[Bit shr 6] and not PtrUInt(PtrUInt(1) shl (Bit and 63))
+  {$ELSE}
+  ProcessorMask[Bit shr 5] := ProcessorMask[Bit shr 5] and not PtrUInt(PtrUInt(1) shl (Bit and 31))
+  {$ENDIF}
+{$ENDIF}
+else
+  raise ESTSCInvalidValue.CreateFmt('STSC_ClrProcessorMaskBit: Invalid bit (%d) selected.',[Bit]);
 end;
 
 //==============================================================================
 
-Function STSC_GetAvailableProcessors: TSTSCProcessorSet;
+Function STSC_GetNumberOfProcessors: Integer;
 {$IFDEF Windows}
 var
-  SystemAffinityMask: TSTSCProcessorSet;
-{$ENDIF}
+  SysInfo:  TSystemInfo;
 begin
+GetNativeSystemInfo(@SysInfo);
+Result := Integer(SysInfo.dwNumberOfProcessors);
+If Result < 1 then
+  Result := 1;
+end;
+{$ELSE}
+begin
+Result := sysconf(_SC_NPROCESSORS_ONLN);
+If Result < 1 then
+  Result := 1;
+end;
+{$ENDIF}
+
+//------------------------------------------------------------------------------
+
+Function STSC_GetAvailableProcessors: TSTSCProcessorMask;
 {$IFDEF Windows}
+var
+  SystemAffinityMask: TSTSCProcessorMask;
+begin
 If not GetProcessAffinityMask(GetCurrentProcess,@Result,@SystemAffinityMask) then
 {$ELSE}
+begin
 // sched_getaffinity called with process id (getpid) returns mask of main thread (process mask)
-If not CheckErr(sched_getaffinity(getpid,SizeOf(TSTSCProcessorSet),@Result)) then
+If not CheckErr(sched_getaffinity(getpid,SizeOf(TSTSCProcessorMask),@Result)) then
 {$ENDIF}
   raise ESTSCSystemError.CreateFmt('STSC_GetAvailableProcessors: Failed to get process affinity mask (%d).',[Integer(GetLastError)]);
 end;
@@ -755,13 +882,73 @@ end;
 
 Function STSC_ProcessorAvailable(ProcessorID: Integer): Boolean;
 begin
-If (ProcessorID >= 0) and (ProcessorID < (SizeOf(TSTSCProcessorSet) * 8)) then
-  Result := STSC_GetProcessorSetBit(STSC_GetAvailableProcessors,ProcessorID)
+If (ProcessorID >= 0) and (ProcessorID < (SizeOf(TSTSCProcessorMask) * 8)) then
+  Result := STSC_GetProcessorMaskBit(STSC_GetAvailableProcessors,ProcessorID)
 else
   Result := False;
 end;
 
 //==============================================================================
+
+Function STSC_GetThreadAffinity: TSTSCProcessorMask;
+begin
+{$IFDEF Windows}
+Result := SetThreadAffinityMask(GetCurrentThread,STSC_GetAvailableProcessors);
+If Result <> 0 then
+  begin
+    // restore the original mask
+    If SetThreadAffinityMask(GetCurrentThread,Result) = 0 then
+      raise ESTSCSystemError.CreateFmt('STSC_GetThreadAffinity: Failed to restore thread affinity mask (%d).',[Integer(GetLastError)]);
+  end
+else
+{$ELSE}
+If not CheckErr(sched_getaffinity(0{calling thread},SizeOf(TSTSCProcessorMask),@Result)) then
+{$ENDIF}
+  raise ESTSCSystemError.CreateFmt('STSC_GetThreadAffinity: Failed to get thread affinity mask (%d).',[Integer(GetLastError)]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_SetThreadAffinity(AffinityMask: TSTSCProcessorMask): TSTSCProcessorMask;
+begin
+{$IFDEF Windows}
+Result := SetThreadAffinityMask(GetCurrentThread,AffinityMask);
+If Result = 0 then
+{$ELSE}
+Result := STSC_GetThreadAffinity;
+If not CheckErr(sched_setaffinity(0{calling thread},SizeOf(TSTSCProcessorMask),@AffinityMask)) then
+{$ENDIF}
+  raise ESTSCSystemError.CreateFmt('STSC_SetThreadAffinity: Failed to set thread affinity mask (%d).',[Integer(GetLastError)]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_GetThreadProcessor: Integer;
+begin
+{$IFDEF Windows}
+If Assigned(varGetCurrentProcessorNumber) then
+  Result := Integer(varGetCurrentProcessorNumber)
+else
+  raise ESTSCCallNotImplemented.Create('STSC_GetThreadProcessor: Cannot obtain thread processor ID.');
+{$ELSE}
+Result := Integer(sched_getcpu);
+{$ENDIF}
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_SetThreadProcessor(ProcessorID: Integer): TSTSCProcessorMask;
+var
+  AffinityMask: TSTSCProcessorMask;
+begin
+If STSC_ProcessorAvailable(ProcessorID) then
+  begin
+    FillChar(AffinityMask,SizeOf(TSTSCProcessorMask),0);
+    STSC_SetProcessorMaskBit(AffinityMask,ProcessorID);
+    Result := STSC_SetThreadAffinity(AffinityMask);
+  end
+else raise ESTSCInvalidValue.CreateFmt('STSC_SetThreadProcessor: Selected processor (%d) not available.',[ProcessorID]);
+end;
 
 
 {===============================================================================
@@ -788,6 +975,11 @@ end;
 //------------------------------------------------------------------------------
 
 procedure UnitInitialization;
+{$IFDEF Windows}
+var
+  ModuleHandle:     THandle;
+  FunctionAddress:  Pointer;
+{$ENDIF}
 begin
 VAR_SupportedFeatures := [];
 with TSimpleCPUID.Create do
@@ -809,6 +1001,22 @@ try
 finally
   Free;
 end;
+{$IFDEF Windows}
+varGetCurrentProcessorNumber := GetCurrentProcessorNumberCPUID;
+ModuleHandle := GetModuleHandle('kernel32.dll');
+If ModuleHandle <> 0 then
+  begin
+    FunctionAddress := GetProcAddress(ModuleHandle,'GetCurrentProcessorNumber');
+    If Assigned(FunctionAddress) then
+      begin
+        varGetCurrentProcessorNumber := FunctionAddress;
+        Include(VAR_SupportedFeatures,tscSysProcID);
+      end;
+  end
+else raise ESTSCSystemError.CreateFmt('UnitInitialization: System library kernel32.dll not loaded (%u).',[GetLastError]);
+{$ELSE}
+Include(VAR_SupportedFeatures,tscSysProcID);
+{$ENDIF}
 end;
 
 //------------------------------------------------------------------------------
