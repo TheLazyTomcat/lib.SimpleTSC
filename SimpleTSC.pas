@@ -159,7 +159,7 @@ unit SimpleTSC;
 interface
 
 uses
-  SysUtils,
+  SysUtils, {$IFNDEF Windows}baseunix,{$ENDIF}
   AuxTypes;
 
 {===============================================================================
@@ -174,6 +174,11 @@ type
   ESTSCSystemError        = class(ESTSCException);
   ESTSCCallNotImplemented = class(ESTSCException);
 
+{===============================================================================
+--------------------------------------------------------------------------------
+                                  TSC functions
+--------------------------------------------------------------------------------
+===============================================================================}
 {===============================================================================
     Core functions - declaration
 ===============================================================================}
@@ -274,6 +279,7 @@ Function STSC_GetTSCFence: TSTSCTimeStamp; register; assembler;
 }
 Function STSC_TicksBetween(TimeStampNow,TimeStampThen: TSTSCTimeStamp): TSTSCTimeStamp;
 
+
 {===============================================================================
     Continuous measurement - declaration
 ===============================================================================}
@@ -354,6 +360,7 @@ procedure STSC_TimePoint(var Measurement: TSTSCMeasurement; TimePointIndex: Inte
 }
 procedure STSC_End(var Measurement: TSTSCMeasurement);
 
+
 {===============================================================================
     Call measurement - declaration
 ===============================================================================}
@@ -395,8 +402,14 @@ procedure STSC_MeasureCall(Call: TSTSCMeasuredCall; CallParam: Pointer; out Time
 }
 Function STSC_MeasureCall(Call: TSTSCMeasuredCall; CallParam: Pointer): Int64; overload;
 
+
 {===============================================================================
-    Auxiliary functions - declaration
+--------------------------------------------------------------------------------
+                               Auxiliary functions
+--------------------------------------------------------------------------------
+===============================================================================}
+{===============================================================================
+    CPU affinity functions - declaration
 ===============================================================================}
 type
 {$IFDEF Windows}
@@ -406,7 +419,12 @@ type
 {$ENDIF}
   PSTSCProcessorMask = ^TSTSCProcessorMask;
 
-//--  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --  --
+  TSTSCProcessID = {$IFDEF Windows}DWORD{$ELSE}pid_t{$ENDIF};
+  TSTSCThreadID  = {$IFDEF Windows}DWORD{$ELSE}pid_t{$ENDIF};  
+
+{-------------------------------------------------------------------------------
+    CPU affinity functions - processor mask manipulation
+-------------------------------------------------------------------------------}
 {
   STSC_GetProcessorMaskBit
 
@@ -437,7 +455,9 @@ procedure STSC_SetProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: I
 }
 procedure STSC_ClrProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer);
 
-//------------------------------------------------------------------------------
+{-------------------------------------------------------------------------------
+    CPU affinity functions - logical processor availability
+-------------------------------------------------------------------------------}
 {
   STSC_GetNumberOfProcessors
 
@@ -494,7 +514,7 @@ Function STSC_SetThreadAffinity(AffinityMask: TSTSCProcessorMask): TSTSCProcesso
     seems to have it), and since I am writing this library so it can run in
     Windows XP too, use of that function cannot be hardcoded.
     So, in unit initialization, the kernel32.dll is probed for this funtion.
-    When it is there, is gets binded and is then used to ontain the number.
+    When it is there, is gets binded and is then used to obtain the number.
     If it is not present, then the number is obtained using SimpleCPUID library
     (which is required by this unit anyway), more specifically from local APIC
     ID (Info.AdditionalInfo.LocalAPICID). But note that this number might not
@@ -605,7 +625,7 @@ Function STSC_SetPriorityClass(PriorityClass: TSCSCPriorityClass): TSCSCPriority
     WARNING - In Linux, unprivileged process/thread cannot increase its own
               priority, even if it was lowered previously and now is only
               returned to original value.
-              Since kernel 2.6.12 is should be posssible to increase the
+              Since kernel 2.6.12 it should be posssible to increase the
               priority (decrease nice value) from unprivileged process depending
               on a soft limit RLIMIT_NICE. But this limit is usually zero
               anyway, and again only privileged process can change this limit,
@@ -646,82 +666,15 @@ uses
 {$IFDEF Windows}
   Windows,
 {$ELSE}
-  baseunix,
+  syscall,
 {$ENDIF}
   SimpleCPUID;
 
 {===============================================================================
-    Declaration of external functions
+--------------------------------------------------------------------------------
+                                  TSC functions
+--------------------------------------------------------------------------------
 ===============================================================================}
-
-{$IFDEF Windows}
-
-Function GetProcessAffinityMask(hProcess: THandle; lpProcessAffinityMask,lpSystemAffinityMask: PPtrUInt): BOOL; stdcall; external kernel32;
-procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
-
-var
-  VAR_GetCurrentProcessorNumber: Function: DWORD; stdcall = nil;
-
-{$ELSE}
-
-Function getpid: pid_t; cdecl; external;
-
-Function errno_ptr: pcInt; cdecl; external name '__errno_location';
-
-Function sched_getaffinity(pid: pid_t; cpusetsize: size_t; mask: PCPUSet): cint; cdecl; external;
-Function sched_setaffinity(pid: pid_t; cpusetsize: size_t; mask: PCPUSet): cint; cdecl; external;
-Function sched_getcpu: cInt; cdecl; external;
-
-const
-  _SC_NPROCESSORS_ONLN = 84;
-
-Function sysconf(name: cInt): cLong; cdecl; external;
-
-Function getpriority(which: cInt; who: cInt): cInt; cdecl external;
-Function setpriority(which: cInt; who: cInt; prio: cInt): cInt; cdecl external;
-
-{$ENDIF}
-
-{===============================================================================
-    Internal functions
-===============================================================================}
-{$IFDEF Windows}
-
-Function GetCurrentProcessorNumberCPUID: DWORD; stdcall;
-begin
-with TSimpleCPUID.Create do
-try
-  Result := DWORD(Info.AdditionalInfo.LocalAPICID);
-finally
-  Free;
-end;
-end;
-
-//------------------------------------------------------------------------------
-{$ELSE}
-threadvar
-  ThrErrorCode: cInt;
-
-//------------------------------------------------------------------------------
-
-Function CheckErr(ReturnedValue: cInt): Boolean;
-begin
-Result := ReturnedValue = 0;
-If Result then
-  ThrErrorCode := 0
-else
-  ThrErrorCode := errno_ptr^;
-end;
-
-//------------------------------------------------------------------------------
-
-Function GetLastError: Integer;
-begin
-Result := Integer(ThrErrorCode);
-end;
-
-{$ENDIF}
-
 {===============================================================================
     Core functions - implementation
 ===============================================================================}
@@ -906,14 +859,14 @@ end;
 
 procedure STSC_MeasureCall(Call: TSTSCMeasuredCall; CallParam: Pointer; out TimeStamps: TSTSCTimeStamps);
 asm
-{
+{-------------------------------------------------------------------------------
   Parameters are passed as such:
 
                           Win32/Lin32   Win64     Lin64
                   Call        EAX        RCX       RDI
              CallParam        EDX        RDX       RSI
       Addr(TimeStamps)        ECX        R8        RDX
-}
+-------------------------------------------------------------------------------}
 {$IFDEF x64}
   {$IFDEF Windows}
     // 64bit Windows
@@ -958,7 +911,8 @@ asm
     POP   RDI
     POP   RSI
 
-  {$ELSE}
+  {$ELSE}//- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
     // 64bit Linux
 
     PUSH  R12
@@ -999,7 +953,8 @@ asm
     POP   R12
 
   {$ENDIF}
-{$ELSE}
+{$ELSE}//- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+
     // 32bit Windows and Linux
 
     PUSH  ESI
@@ -1059,8 +1014,110 @@ end;
 
 
 {===============================================================================
-    Auxiliary functions - implementation
+--------------------------------------------------------------------------------
+                               Auxiliary functions
+--------------------------------------------------------------------------------
 ===============================================================================}
+{===============================================================================
+    External/system functions
+===============================================================================}
+
+{$IFDEF Windows}
+
+Function GetProcessAffinityMask(hProcess: THandle; lpProcessAffinityMask,lpSystemAffinityMask: PPtrUInt): BOOL; stdcall; external kernel32;
+procedure GetNativeSystemInfo(lpSystemInfo: PSystemInfo); stdcall; external kernel32;
+
+{$ELSE}
+
+Function getpid: pid_t; cdecl; external;
+
+Function errno_ptr: pcInt; cdecl; external name '__errno_location';
+
+Function sched_getaffinity(pid: pid_t; cpusetsize: size_t; mask: PCPUSet): cint; cdecl; external;
+Function sched_setaffinity(pid: pid_t; cpusetsize: size_t; mask: PCPUSet): cint; cdecl; external;
+Function sched_getcpu: cInt; cdecl; external;
+
+const
+  _SC_NPROCESSORS_ONLN = 84;
+
+Function sysconf(name: cInt): cLong; cdecl; external;
+
+Function getpriority(which: cInt; who: cInt): cInt; cdecl external;
+Function setpriority(which: cInt; who: cInt; prio: cInt): cInt; cdecl external;
+
+{$ENDIF}
+
+{===============================================================================
+    Internal functions
+===============================================================================}
+{$IFDEF Windows}
+var
+  VAR_ProcessorIDMap: record
+    Available:  Boolean;
+    ProcNums:   array[Byte{Local APIC ID is used as index}] of Integer;
+  end;
+
+//------------------------------------------------------------------------------  
+
+Function GetCurrentProcessorNumberCPUID: DWORD; stdcall;
+var
+  CPUIDResult:  TCPUIDResult;
+  Temp:         Integer;
+begin
+If VAR_ProcessorIDMap.Available then
+  begin
+    // if VAR_ProcessorIDMap.Available is true then CPUID is supported
+    CPUID(1,@CPUIDResult);
+    Temp := VAR_ProcessorIDMap.ProcNums[Byte(CPUIDResult.EBX shr 24)];
+    If Temp >= 0 then
+      Result := DWORD(Temp)
+    else
+      Result := 0;
+  end
+else Result := 0;
+end;
+
+//------------------------------------------------------------------------------
+var
+  VAR_GetCurrentProcessorNumber: Function: DWORD; stdcall = GetCurrentProcessorNumberCPUID;
+
+{$ELSE}//-----------------------------------------------------------------------
+
+Function gettid: pid_t;
+begin
+Result := do_syscall(syscall_nr_gettid);
+end;
+
+//------------------------------------------------------------------------------
+threadvar
+  ThrErrorCode: cInt;
+
+//------------------------------------------------------------------------------
+
+Function CheckErr(ReturnedValue: cInt): Boolean;
+begin
+Result := ReturnedValue = 0;
+If Result then
+  ThrErrorCode := 0
+else
+  ThrErrorCode := errno_ptr^;
+end;
+
+//------------------------------------------------------------------------------
+
+Function GetLastError: Integer;
+begin
+Result := Integer(ThrErrorCode);
+end;
+
+{$ENDIF}
+
+{===============================================================================
+    CPU affinity functions - implementation
+===============================================================================}
+{-------------------------------------------------------------------------------
+    CPU affinity functions - processor mask manipulation
+-------------------------------------------------------------------------------}
 
 Function STSC_GetProcessorMaskBit(const ProcessorMask: TSTSCProcessorMask; Bit: Integer): Boolean;
 begin
@@ -1477,6 +1534,36 @@ end;
 
 //------------------------------------------------------------------------------
 
+{$IFDEF Windows}
+procedure BuildProcessorIDMap;
+var
+  AffinityMask: TSTSCProcessorMask;
+  i:            Integer;
+  CPUIDResult:  TCPUIDResult;
+begin
+FillChar(VAR_ProcessorIDMap,SizeOf(VAR_ProcessorIDMap),0);
+If CPUIDSupported then
+  begin
+    VAR_ProcessorIDMap.Available := True;
+    // init proc nums with invalid values
+    For i := Low(VAR_ProcessorIDMap.ProcNums) to High(VAR_ProcessorIDMap.ProcNums) do
+      VAR_ProcessorIDMap.ProcNums[i] := -1;
+    // get apic id to cpu number map
+    AffinityMask := 1;
+    For i := Low(VAR_ProcessorIDMap.ProcNums) to Pred(STSC_GetNumberOfProcessors) do
+      begin
+        STSC_SetThreadAffinity(AffinityMask);
+        CPUID(1,@CPUIDResult);
+        VAR_ProcessorIDMap.ProcNums[Byte(CPUIDResult.EBX shr 24)] := i;
+        AffinityMask := AffinityMask shl 1;
+      end;
+  end
+else VAR_ProcessorIDMap.Available := False;
+end;
+{$ENDIF}
+
+//------------------------------------------------------------------------------
+
 procedure UnitInitialization;
 {$IFDEF Windows}
 var
@@ -1505,7 +1592,6 @@ finally
   Free;
 end;
 {$IFDEF Windows}
-VAR_GetCurrentProcessorNumber := GetCurrentProcessorNumberCPUID;
 ModuleHandle := GetModuleHandle('kernel32.dll');
 If ModuleHandle <> 0 then
   begin
@@ -1514,7 +1600,8 @@ If ModuleHandle <> 0 then
       begin
         VAR_GetCurrentProcessorNumber := FunctionAddress;
         Include(VAR_SupportedFeatures,tscSysProcID);
-      end;
+      end
+    else BuildProcessorIDMap;
   end
 else raise ESTSCSystemError.CreateFmt('UnitInitialization: System library kernel32.dll not loaded (%u).',[GetLastError]);
 {$ELSE}
