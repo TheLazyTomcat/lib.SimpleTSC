@@ -12,24 +12,26 @@
     Provides means of reading Time-Stamp Counter (TSC) Model-Specific Register
     (MSR), which can be used for high-resolution time measurements.
 
-      NOTE - this register is present only on IA-32 and AMD64 processors.
+      NOTE - this register is present only on IA-32 (x86) and AMD64 (x86-64,
+             x64) processors.
 
     Because proper use of TSC requires manipulation of thread affinity and
-    potentially also priority, a set of auxiliary functions manipulation those
+    potentially also priority, a set of auxiliary functions manipulating those
     thread properties is also provided.
 
     The TSC register is 64 bits wide, but time-stamp type used here is declared
     as Int64 (that is, a signed value). This could pose problems in comparisons
     and arithmetics, if the bit 63 of the TSC would be set. Therefore, all time-
-    stamps returned by implemented functions (with notable exception being
-    STSC_GetTSCFull) are masked so that bit 63 (sign bit) is always clear (0).
+    stamps returned by implemented functions (with noted exceptions) are masked
+    so that bit 63 (sign bit) is always clear (0).
 
     The TSC is NOT guaranteed to be present and/or enabled on all systems, and
     most functions also require another instructions (memory fences) which too
     are not guaranteed to be supported everywhere.
     So, in initialization section of this unit, it is discerned whether the
-    register is present on the CPU, is enabled (not disabled) by the OS and
-    whether other required instructions are also supported.
+    register is present on the CPU, is enabled (or, more precisely, not
+    disabled) by the OS and whether other required instructions are also
+    supported.
     Because this unit also provides some auxiliry funtions that do not depend
     on presence of this register, it has been decided to not raise an exception
     if the TSC is not supported.
@@ -41,7 +43,7 @@
       functions:
 
         STSC_GetTSC
-        STSC_GetTSCFull
+        STSC_GetFullTSC
 
       If the set contains tscSupported, you can, in addition, also call
       following functions:
@@ -49,6 +51,9 @@
         STSC_GetTSCEnter
         STSC_GetTSCLeave
         STSC_GetTSCFence
+        STSC_GetFullTSCEnter
+        STSC_GetFullTSCLeave
+        STSC_GetFullTSCFence
         STSC_Start
         STSC_TimePoint
         STSC_End
@@ -61,7 +66,7 @@
       even if the returned set is empty.
 
     TSC is a counter register, which means it is monotonically incremented each
-    cycle, but frequency of of these cycles might not be constant.
+    cycle, but frequency of these cycles might not be constant.
 
       In very old processors (Pentium 4, Pentium M, ...), the register is
       incremented in every internal processor clock cycle. If CPU frequency
@@ -260,14 +265,6 @@ type
 Function STSC_GetTSC: TSTSCTimeStamp; register; assembler;
 
 {
-  STSC_GetTSCUnmasked
-
-  Returns full value of time-stamp counter (TSC) register, without masking
-  bit #63 in the result.
-}
-Function STSC_GetTSCFull: TSTSCTimeStamp; register; assembler;
-
-{
   STSC_GetTSCEnter
 
   Returns value of time-stamp counter (TSC) register while ensuring that the
@@ -295,7 +292,39 @@ Function STSC_GetTSCLeave: TSTSCTimeStamp; register; assembler;
   (including any memory accesses).
 }
 Function STSC_GetTSCFence: TSTSCTimeStamp; register; assembler;
-{$message 'add tsc funcs returning full register and with fences'}
+
+//------------------------------------------------------------------------------
+{
+  STSC_GetFullTSC
+
+  Returns full value of time-stamp counter (TSC) register, without masking
+  bit #63 in the result.
+}
+Function STSC_GetFullTSC: TSTSCTimeStamp; register; assembler;
+
+{
+  STSC_GetFullTSCEnter
+
+  Works the same as STSC_GetTSCEnter, but returns the value in full width,
+  without masking bit #63.
+}
+Function STSC_GetFullTSCEnter: TSTSCTimeStamp; register; assembler;
+
+{
+  STSC_GetFullTSCLeave
+
+  Works the same as STSC_GetTSCLeave, but returns the value with bit #63
+  unmasked.
+}
+Function STSC_GetFullTSCLeave: TSTSCTimeStamp; register; assembler;
+
+{
+  STSC_GetFullTSCFence
+
+  Works the same as STSC_GetTSCFence, but returns the value with bit #63
+  unmasked.
+}
+Function STSC_GetFullTSCFence: TSTSCTimeStamp; register; assembler;
 
 //------------------------------------------------------------------------------
 {
@@ -1316,18 +1345,6 @@ end;
 
 //------------------------------------------------------------------------------
 
-Function STSC_GetTSCFull: TSTSCTimeStamp; register; assembler;
-asm
-    RDTSC
-
-{$IFDEF x64}
-    SHL   RDX, 32
-    OR    RAX, RDX
-{$ENDIF}
-end;
-
-//------------------------------------------------------------------------------
-
 Function STSC_GetTSCEnter: TSTSCTimeStamp; register; assembler;
 asm
     RDTSC
@@ -1365,6 +1382,60 @@ asm
     LFENCE
 
     AND   EDX, $7FFFFFFF
+{$IFDEF x64}
+    SHL   RDX, 32
+    OR    RAX, RDX
+{$ENDIF}
+end;
+
+//==============================================================================
+
+Function STSC_GetFullTSC: TSTSCTimeStamp; register; assembler;
+asm
+    RDTSC
+
+{$IFDEF x64}
+    SHL   RDX, 32
+    OR    RAX, RDX
+{$ENDIF}
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_GetFullTSCEnter: TSTSCTimeStamp; register; assembler;
+asm
+    RDTSC
+    LFENCE
+
+{$IFDEF x64}
+    SHL   RDX, 32
+    OR    RAX, RDX
+{$ENDIF}
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_GetFullTSCLeave: TSTSCTimeStamp; register; assembler;
+asm
+    MFENCE
+    LFENCE
+    RDTSC
+
+{$IFDEF x64}
+    SHL   RDX, 32
+    OR    RAX, RDX
+{$ENDIF}
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_GetFullTSCFence: TSTSCTimeStamp; register; assembler;
+asm
+    MFENCE
+    LFENCE
+    RDTSC
+    LFENCE
+
 {$IFDEF x64}
     SHL   RDX, 32
     OR    RAX, RDX
