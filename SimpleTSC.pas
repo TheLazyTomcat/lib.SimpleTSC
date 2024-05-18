@@ -96,9 +96,9 @@
     measurement runs the whole time only on one processor core (use provided
     auxiliary functions to set thread affinity).
 
-  Version 1.1.3 (2024-05-03)
+  Version 1.2 (2024-05-18)
 
-  Last change 2024-05-03
+  Last change 2024-05-18
 
   ©2023-2024 František Milt
 
@@ -487,6 +487,14 @@ type
     CPU affinity functions - processor mask manipulation
 -------------------------------------------------------------------------------}
 {
+  STSC_InitProcessorMask
+
+  Fills all bits in the given processor mask to selected value (true = all bits
+  set, false(default) = all bits clear).
+}
+procedure STSC_InitProcessorMask(out ProcessorMask: TSTSCProcessorMask; Value: Boolean = False);
+
+{
   STSC_GetProcessorMaskBit
 
   Returns true when selected Bit in the ProcessorMask is 1, false otherwise.
@@ -515,6 +523,17 @@ procedure STSC_SetProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: I
   raised.
 }
 procedure STSC_ClrProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer);
+
+{
+  STSC_CplProcessorMaskBit
+
+  Complements (switches) selected Bit in the ProcessorMask and returns its
+  original value.
+
+  When Bit is out of allowable range, an exception of type ESTSCInvalidValue is
+  raised.
+}
+Function STSC_CplProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer): Boolean;
 
 {-------------------------------------------------------------------------------
     CPU affinity functions - process affinity
@@ -977,21 +996,21 @@ Function STSC_GetThreadSchedulingPolicy: TSTSCSchedPolicy; overload;
   previous one. Has meaning only in Linux, in Windows it does nothing and
   always returns spNormal.
 
-  When setting spFifo or spRR policy, the scheduling priority is set to 50.
-  In all other cases it is set to zero.
+  When setting spFifo or spRR policy, the scheduling priority is set to 0.5
+  times the range implemented by system. In all other cases it is set to zero.
 
-  Note that spDeadline policy cannot be selected using this function (if will
-  fail).
+  Note that spISO cannot be set because it is not implemented in Linux atm.
+  Also spDeadline policy cannot be selected using this function - it requires
+  different mechanism (in both cases it will fail with an ESTSCSystemError
+  exception).
 
-    WARNING - Unprivileged process might not be able to change its own
-              scheduling policy, depending on current and selected policy
-              (eg. it seems to be possible to change from SCHED_OTHER to
-              SCHED_IDLE or SCHED_BATCH, I need to do some research into this).
+    WARNING - Thread running in an unprivileged process might not be able to
+              change scheduling policy of other thread (the function will fail
+              with ESTSCSystemError exception), depending on current and
+              selected new policy. See linux documentation (sched(7)) for more
+              details.
 }
 Function STSC_SetThreadSchedulingPolicy(ThreadID: TSTSCThreadID; SchedulingPolicy: TSTSCSchedPolicy): TSTSCSchedPolicy; overload;
-{$message 'edit notes'}
-{$message 'add platform hints where appropriate'}
-{$message 'set prio to current values?'}
 
 {
   STSC_SetThreadSchedulingPolicy
@@ -1002,6 +1021,11 @@ Function STSC_SetThreadSchedulingPolicy(ThreadID: TSTSCThreadID; SchedulingPolic
 
   Refer to previous overload of STSC_SetThreadSchedulingPolicy for more
   details.
+
+    WARNING - Thread running in an unprivileged process might not be able to
+              change its own scheduling policy (the function will fail with
+              ESTSCSystemError exception), depending on current and selected
+              new policy. See linux documentation (sched(7)) for details.
 }
 Function STSC_SetThreadSchedulingPolicy(SchedulingPolicy: TSTSCSchedPolicy): TSTSCSchedPolicy; overload;
 
@@ -1148,9 +1172,11 @@ Function STSC_SetSysThreadPriority(ThreadID: TSTSCThreadID; SysThreadPriority: I
               RLIMIT_NICE. But this limit is usually zero anyway, and again
               only privileged process can change this limit, so not much
               changes.
+              The same goes for realtime-policy priority - there RLIMIT_RTPRIO
+              limit applies (also since kernel 2.6.12).
 }
 Function STSC_SetSysThreadPriority(SysThreadPriority: Integer): Integer; overload;
-{$message 'edit notes'}
+
 {-------------------------------------------------------------------------------
     Priority funtions - thread priority
 -------------------------------------------------------------------------------}
@@ -1740,8 +1766,10 @@ Function sched_get_priority_max(policy: cint): cint; cdecl; external;
 
 Function sysconf(name: cInt): cLong; cdecl; external;
 
-Function getpriority(which: cInt; who: cInt): cInt; cdecl external;
-Function setpriority(which: cInt; who: cInt; prio: cInt): cInt; cdecl external;
+Function getpriority(which: cint; who: cint): cint; cdecl external;
+Function setpriority(which: cint; who: cint; prio: cint): cint; cdecl external;
+
+Function getrlimit(resource: cint; rlim: PRLimit): cint; cdecl; external;
 
 const
   SCHED_NORMAL   = 0;
@@ -1753,6 +1781,8 @@ const
   SCHED_DEADLINE = 6;
 
   _SC_NPROCESSORS_ONLN = 84;
+
+  RLIMIT_RTPRIO = 14;
 
 {$ENDIF}
 
@@ -1783,13 +1813,14 @@ type
   that the mentioned function and this structure might differ in newer systems
   (I also doubt it will be retroactively changed in WinXP by some patch now).
 }
-  TThreadInfo = packed record
-    _unknown_:          array[0..7] of Byte;
-    ProcessID:          DWORD;
-    ThreadID:           DWORD;
-    ThreadAffinity:     DWORD;
-    ThreadDynPriority:  Integer;  // dynamic priority
-    ThreadPriority:     Integer;  // dunno, maybe something else
+  TThreadInfo = record
+    _unknown1_,
+    _unknown2_:         PtrUInt;
+    ProcessID:          PtrUInt;
+    ThreadID:           PtrUInt;
+    ThreadAffinity:     PtrUInt;
+    ThreadDynPriority:  Int32;    // dynamic priority
+    ThreadPriority:     Int32;    // dunno, maybe something else
   end;
 var
   ThreadInfo:   TThreadInfo;
@@ -1905,6 +1936,16 @@ end;
     CPU affinity functions - processor mask manipulation
 -------------------------------------------------------------------------------}
 
+procedure STSC_InitProcessorMask(out ProcessorMask: TSTSCProcessorMask; Value: Boolean = False);
+begin
+If Value then
+  FillChar(Addr(ProcessorMask)^,SizeOf(TSTSCProcessorMask),$FF)
+else
+  FillChar(Addr(ProcessorMask)^,SizeOf(TSTSCProcessorMask),0);
+end;
+
+//------------------------------------------------------------------------------
+
 Function STSC_GetProcessorMaskBit(const ProcessorMask: TSTSCProcessorMask; Bit: Integer): Boolean;
 begin
 If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorMask) * 8)) then
@@ -1955,6 +1996,26 @@ If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorMask) * 8)) then
 {$ENDIF}
 else
   raise ESTSCInvalidValue.CreateFmt('STSC_ClrProcessorMaskBit: Invalid bit (%d) selected.',[Bit]);
+end;
+
+//------------------------------------------------------------------------------
+
+Function STSC_CplProcessorMaskBit(var ProcessorMask: TSTSCProcessorMask; Bit: Integer): Boolean;
+begin
+If (Bit >= 0) and (Bit < (SizeOf(TSTSCProcessorMask) * 8)) then
+  begin
+    Result := STSC_GetProcessorMaskBit(ProcessorMask,Bit);
+  {$IFDEF Windows}
+    ProcessorMask := ProcessorMask xor PtrUInt(PtrUInt(1) shl Bit)
+  {$ELSE}
+    {$IFDEF x64}
+    ProcessorMask[Bit shr 6] := ProcessorMask[Bit shr 6] xor PtrUInt(PtrUInt(1) shl (Bit and 63))
+    {$ELSE}
+    ProcessorMask[Bit shr 5] := ProcessorMask[Bit shr 5] xor PtrUInt(PtrUInt(1) shl (Bit and 31))
+    {$ENDIF}
+  {$ENDIF}
+  end
+else raise ESTSCInvalidValue.CreateFmt('STSC_CplProcessorMaskBit: Invalid bit (%d) selected.',[Bit]);
 end;
 
 {-------------------------------------------------------------------------------
@@ -2647,6 +2708,8 @@ end;
 var
   SchedPolicy:  cInt;
   Param:        sched_param;
+  EncodedPrio:  cInt;
+  PrioLimit:    TRLimit;
 begin
 Result := STSC_GetThreadSchedulingPolicy(ThreadID);
 If Result <> SchedulingPolicy then
@@ -2664,9 +2727,21 @@ If Result <> SchedulingPolicy then
       raise ESTSCInvalidValue.CreateFmt('STSC_SetThreadSchedulingPolicy: Unknown scheduling policy (%d)',[Ord(SchedulingPolicy)]);
     end;
     If SchedulingPolicy in [spFifo,spRR] then
-      Param.sched_priority := EncodeSchedulingPriority(SchedulingPolicy,0.5)
-    else
-      Param.sched_priority := 0;
+      begin
+        EncodedPrio := EncodeSchedulingPriority(SchedulingPolicy,0.5);
+        If not CheckErr(getrlimit(RLIMIT_RTPRIO,@PrioLimit)) then
+          raise ESTSCSystemError.CreateFmt('STSC_SetThreadSchedulingPolicy: Failed to get realtime priority limit (%d).',[GetLastError]);
+        If PrioLimit.rlim_cur <> 0 then
+          begin
+            If cint(PrioLimit.rlim_cur) < EncodedPrio then
+              Param.sched_priority := Trunc(STSC_GetSysPriorityMin(SchedulingPolicy) +
+                (cint(PrioLimit.rlim_cur) - STSC_GetSysPriorityMin(SchedulingPolicy)) * 0.5)
+            else
+              Param.sched_priority := EncodedPrio
+          end
+        else Param.sched_priority := EncodedPrio;
+      end
+    else Param.sched_priority := 0;
     If not CheckErr(sched_setscheduler(ThreadID,SchedPolicy,@Param)) then
       raise ESTSCSystemError.CreateFmt('STSC_SetThreadSchedulingPolicy: Failed to set thread scheduling policy (%d).',[GetLastError]);
   end;
@@ -2706,8 +2781,8 @@ case SchedulingPolicy of
         Result := Integer(sched_get_priority_min(SCHED_FIFO))
       else
         Result := Integer(sched_get_priority_min(SCHED_RR));
-      If not CheckErr(cint(SchedulingPolicy)) then
-        raise ESTSCSystemError.CreateFmt('STSC_GetSysPriorityMin: Failed to get scheduling priority minimum (%d).',[GetLastError]);
+      If Result = -1 then
+        raise ESTSCSystemError.CreateFmt('STSC_GetSysPriorityMin: Failed to get scheduling priority minimum (%d).',[errno_ptr^]);
     end;
 else
   Result := 0;
@@ -2733,8 +2808,8 @@ case SchedulingPolicy of
         Result := Integer(sched_get_priority_max(SCHED_FIFO))
       else
         Result := Integer(sched_get_priority_max(SCHED_RR));
-      If not CheckErr(cint(SchedulingPolicy)) then
-        raise ESTSCSystemError.CreateFmt('STSC_GetSysPriorityMax: Failed to get scheduling priority maximum (%d).',[GetLastError]);
+      If Result = -1 then
+        raise ESTSCSystemError.CreateFmt('STSC_GetSysPriorityMax: Failed to get scheduling priority maximum (%d).',[errno_ptr^]);
     end;
 else
   Result := 0;
@@ -2971,7 +3046,7 @@ case SchedPolicy of
         Result := tpAboveNormal
       else If (PrioFraction >= 0.75) and (PrioFraction < 1.0) then
         Result := tpHighest
-      else If PrioFraction >= 1.0 then
+      else {If PrioFraction >= 1.0 then}
         Result := tpTimeCritical;
     end;
   spBatch,spIdle,spDeadline:  // - - - - - - - - - - - - - - - - - - - - - - - -
@@ -3054,51 +3129,50 @@ else raise ESTSCSystemError.CreateFmt('STSC_SetThreadPriority: Failed to open th
 end;
 {$ELSE}
 var
-  SchedPolicy:        TSTSCSchedPolicy;
-  SysThreadPriority:  Integer;
+  SchedPolicy:  TSTSCSchedPolicy;
 begin
 Result := STSC_GetThreadPriority(ThreadID);
 SchedPolicy := STSC_GetThreadSchedulingPolicy(ThreadID);
 case SchedPolicy of
   spNormal,spOther: // - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     case ThreadPriority of
-      tpIdle:         SysThreadPriority := 19;
+      tpIdle:         STSC_SetSysThreadPriority(ThreadID,19);
       tpLowestRT7,
       tpLowestRT6,
       tpLowestRT5,
       tpLowestRT4,
       tpLowestRT3,
-      tpLowest:       SysThreadPriority := 18;
-      tpBelowNormal:  SysThreadPriority := 9;
-      tpNormal:       SysThreadPriority := 0;
-      tpAboveNormal:  SysThreadPriority := -10;
+      tpLowest:       STSC_SetSysThreadPriority(ThreadID,18);
+      tpBelowNormal:  STSC_SetSysThreadPriority(ThreadID,9);
+      tpNormal:       STSC_SetSysThreadPriority(ThreadID,0);
+      tpAboveNormal:  STSC_SetSysThreadPriority(ThreadID,-10);
       tpHighestRT3,
       tpHighestRT4,
       tpHighestRT5,
       tpHighestRT6,
-      tpHighest:      SysThreadPriority := -19;
-      tpTimeCritical: SysThreadPriority := -20;
+      tpHighest:      STSC_SetSysThreadPriority(ThreadID,-19);
+      tpTimeCritical: STSC_SetSysThreadPriority(ThreadID,-20);
     else
       raise ESTSCInvalidValue.CreateFmt('STSC_SetThreadPriority: Invalid thread priority (%d).',[Ord(ThreadPriority)]);
     end;
   spFifo,spRR:  // - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
     case ThreadPriority of
-      tpIdle:         SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,0.0);
+      tpIdle:         STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,0.0));
       tpLowestRT7,
       tpLowestRT6,
       tpLowestRT5,
       tpLowestRT4,
       tpLowestRT3,
-      tpLowest:       SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,0.05);
-      tpBelowNormal:  SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,0.30);
-      tpNormal:       SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,0.5);
-      tpAboveNormal:  SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,0.70);
+      tpLowest:       STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,0.05));
+      tpBelowNormal:  STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,0.30));
+      tpNormal:       STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,0.5));
+      tpAboveNormal:  STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,0.70));
       tpHighestRT3,
       tpHighestRT4,
       tpHighestRT5,
       tpHighestRT6,
-      tpHighest:      SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,0.95);
-      tpTimeCritical: SysThreadPriority := EncodeSchedulingPriority(SchedPolicy,1.0);
+      tpHighest:      STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,0.95));
+      tpTimeCritical: STSC_SetSysThreadPriority(ThreadID,EncodeSchedulingPriority(SchedPolicy,1.0));
     else
       raise ESTSCInvalidValue.CreateFmt('STSC_SetThreadPriority: Invalid thread priority (%d).',[Ord(ThreadPriority)]);
     end;
@@ -3107,7 +3181,6 @@ case SchedPolicy of
 else
   raise ESTSCInvalidValue.CreateFmt('STSC_SetThreadPriority: Unknown scheduling policy (%d)',[Ord(SchedPolicy)]);
 end;
-STSC_SetSysThreadPriority(ThreadID,SysThreadPriority);
 end;
 {$ENDIF}
 
